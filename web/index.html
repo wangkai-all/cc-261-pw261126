@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>流式导出工作台</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header>
+  <h1>流式导出工作台</h1>
+  <p class="sub">边计算边下载 · 断线从已确认行号续传 · 排序键重复也不跳行不重复</p>
+</header>
+
+<main>
+<section class="card">
+  <h2>1. 源表状态与数据操作</h2>
+  <div class="row" id="source-status">加载中…</div>
+  <div class="row gap">
+    <button id="btn-refresh-source">刷新源表状态</button>
+    <button id="btn-mutate-insert">插入 100 行</button>
+    <button id="btn-mutate-update">更新 100 行</button>
+    <button id="btn-mutate-delete">删除 100 行</button>
+    <button id="btn-mutate-mixed">混合变更 200 行</button>
+    <button id="btn-rebuild" class="warn">重建样例库（清空重来）</button>
+  </div>
+  <p class="hint">导出进行中也可以改源表：结果模式查询已在旧事务视图上流式执行；
+    快照模式定格在备份瞬间。页面显示的校验和只对「导出时刻的数据」负责。</p>
+</section>
+
+<section class="card">
+  <h2>2. 创建导出</h2>
+  <label>预置查询
+    <select id="sample-select"></select>
+  </label>
+  <label class="full">SQL（必须含显式 ORDER BY；允许聚合 GROUP BY）
+    <textarea id="sql-input" rows="5" spellcheck="false"></textarea>
+  </label>
+  <div class="row gap">
+    <label>保留策略
+      <select id="mode-select">
+        <option value="result">result：保留结果分片（恢复不重算，占结果大小）</option>
+        <option value="snapshot">snapshot：固定输入快照（恢复时重算，占源库大小）</option>
+      </select>
+    </label>
+    <label>保留期限 TTL（秒，最小 30）
+      <input id="ttl-input" type="number" min="30" value="3600">
+    </label>
+    <button id="btn-create" class="primary">创建导出</button>
+  </div>
+  <p class="hint" id="query-hint"></p>
+</section>
+
+<section class="card">
+  <h2>3. 导出任务</h2>
+  <div class="row gap">
+    <button id="btn-refresh-exports">刷新任务列表</button>
+    <label class="inline"><input type="checkbox" id="auto-poll" checked> 自动轮询</label>
+  </div>
+  <table id="export-table">
+    <thead><tr>
+      <th>ID</th><th>模式</th><th>状态</th><th>进度（已确认/总行数）</th>
+      <th>保留物/空间</th><th>保留到期</th><th>校验和</th><th>操作</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section class="card" id="work-card" hidden>
+  <h2>4. 下载工作台 — <span id="work-id"></span></h2>
+  <div class="grid">
+    <div><b>状态：</b><span id="work-state"></span></div>
+    <div><b>模式：</b><span id="work-mode"></span></div>
+    <div><b>连接：</b><span id="work-conn"></span></div>
+    <div><b>共享确认水位：</b><span id="work-watermark"></span></div>
+    <div><b>本地已组装：</b><span id="work-assembled"></span></div>
+    <div><b>总行数：</b><span id="work-total"></span></div>
+  </div>
+  <div class="progress-wrap"><div id="progress-bar"></div></div>
+  <div class="row gap wrap">
+    <button id="btn-open" class="primary">打开/继续下载</button>
+    <button id="btn-disconnect">模拟断线（中止连接）</button>
+    <button id="btn-close-conn">正常关闭连接</button>
+    <button id="btn-cancel" class="warn">取消整个导出</button>
+    <button id="btn-verify">校对完整文件（sha256）</button>
+    <button id="btn-save">下载 .csv 文件</button>
+    <button id="btn-reset-local">清空本地组装结果</button>
+    <button id="btn-reset-server">重置服务端进度并重新全量下载</button>
+  </div>
+  <p class="hint">
+    「模拟断线」直接中止 HTTP 流但不关闭服务端连接，可验证迟到 ack 与重连幂等；
+    「正常关闭连接」会提升连接代次，旧流上的确认将被 409 拒绝。
+  </p>
+  <h3>事件流（确认/取消/过期/恢复）</h3>
+  <pre id="event-log" class="log"></pre>
+  <h3>消息</h3>
+  <pre id="message-log" class="log"></pre>
+</section>
+
+<section class="card">
+  <h2>5. 两种保留策略对比</h2>
+  <table>
+    <thead><tr><th>维度</th><th>result 结果分片</th><th>snapshot 输入快照</th></tr></thead>
+    <tbody>
+      <tr><td>保留什么</td><td>查询产出的 CSV 分片（500 行/片）</td><td>源库一致性备份 + 查询定义</td></tr>
+      <tr><td>占用空间</td><td>≈ 导出结果大小（结果越大约贵）</td><td>≈ 源库大小（与结果大小无关）</td></tr>
+      <tr><td>恢复耗时</td><td>本地读分片，O(剩余字节)，无查询计算</td><td>按行号分页重算，O(剩余行) 查询成本</td></tr>
+      <tr><td>源表继续更新时</td><td>已产出分片不受影响；未产出部分在失败重建时会漂移，故中途崩溃直接判失败</td>
+          <td>快照永久定格，任何时候重算都是同一份数据</td></tr>
+      <tr><td>保留期限到期</td><td colspan="2">删除保留物、只留元数据；续传返回 410，并解释为何无法继续</td></tr>
+    </tbody>
+  </table>
+</section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
